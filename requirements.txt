@@ -1,0 +1,21 @@
+# Core Pipecat framework with necessary services (minimum version for Fish support)
+pipecat-ai[openai,daily,silero]
+ormsgpack
+pyaudio
+
+# Environment variable management
+python-dotenv
+
+# Additional dependencies for API requests (for Daily room creation)
+requests
+
+# Audio processing dependencies
+numpy
+scipy
+
+# Optional: Better logging and monitoring
+structlog
+
+# Optional: For advanced audio processing
+librosa
+soundfile
