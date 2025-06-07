@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pipecat 语音助手</title>
+    <style>
+        /* 语音助手界面样式 */
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
+        #container {
+            text-align: center;
+            padding: 40px;
+            border-radius: 20px;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            max-width: 600px;
+            width: 100%;
+            animation: slideIn 0.5s ease-out;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        h1 {
+            color: #1a1a1a;
+            margin-bottom: 10px;
+            font-size: 2rem;
+            font-weight: 600;
+        }
+
+        p {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 1.1rem;
+            line-height: 1.5;
+        }
+
+        #status {
+            font-weight: bold;
+            margin-bottom: 30px;
+            padding: 15px 20px;
+            border-radius: 25px;
+            display: inline-block;
+            font-size: 1rem;
+            transition: all 0.3s ease;
+            min-width: 200px;
+        }
+
+        .status-disconnected { 
+            color: #d93025; 
+            background: linear-gradient(135deg, #fce8e6, #f8d7da);
+            border: 2px solid #f5c6cb;
+        }
+
+        .status-connecting { 
+            color: #1a73e8; 
+            background: linear-gradient(135deg, #e8f0fe, #cce7ff);
+            border: 2px solid #bee5eb;
+        }
+
+        .status-connected { 
+            color: #1e8e3e; 
+            background: linear-gradient(135deg, #e6f4ea, #d1eddb);
+            border: 2px solid #c3e6cb;
+        }
+
+        .status-error { 
+            color: #c5221f; 
+            background: linear-gradient(135deg, #fce8e6, #f8d7da);
+            border: 2px solid #f5c6cb;
+        }
+
+        button {
+            background: linear-gradient(135deg, #1a73e8, #1967d2);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            font-size: 16px;
+            font-weight: 600;
+            border-radius: 25px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(26, 115, 232, 0.3);
+            min-width: 200px;
+        }
+
+        button:hover {
+            background: linear-gradient(135deg, #1967d2, #1557b0);
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(26, 115, 232, 0.4);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        button:disabled {
+            background: linear-gradient(135deg, #d1d1d1, #bbb);
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        #conversation {
+            margin-top: 30px;
+            text-align: left;
+            background: rgba(247, 248, 249, 0.8);
+            border-radius: 15px;
+            padding: 20px;
+            max-height: 300px;
+            overflow-y: auto;
+            transition: all 0.3s ease;
+        }
+
+        .conversation-hidden {
+            display: none;
+        }
+
+        .conversation-visible {
+            display: block;
+            animation: fadeIn 0.3s ease-out;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        #conversation h3 {
+            color: #1a1a1a;
+            margin-top: 0;
+            margin-bottom: 15px;
+            font-size: 1.2rem;
+        }
+
+        #messages {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .message {
+            padding: 10px 15px;
+            border-radius: 15px;
+            max-width: 80%;
+            word-wrap: break-word;
+            animation: messageSlide 0.3s ease-out;
+        }
+
+        @keyframes messageSlide {
+            from {
+                opacity: 0;
+                transform: translateX(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+
+        .message.user {
+            background: linear-gradient(135deg, #e3f2fd, #bbdefb);
+            color: #1565c0;
+            align-self: flex-end;
+            border-bottom-right-radius: 5px;
+        }
+
+        .message.assistant {
+            background: linear-gradient(135deg, #f3e5f5, #e1bee7);
+            color: #7b1fa2;
+            align-self: flex-start;
+            border-bottom-left-radius: 5px;
+        }
+
+        .message .timestamp {
+            font-size: 0.8rem;
+            opacity: 0.7;
+            margin-top: 5px;
+        }
+
+        /* 响应式设计 */
+        @media (max-width: 768px) {
+            body {
+                padding: 10px;
+                align-items: flex-start;
+                padding-top: 50px;
+            }
+            
+            #container {
+                padding: 30px 20px;
+            }
+            
+            h1 {
+                font-size: 1.5rem;
+            }
+            
+            p {
+                font-size: 1rem;
+            }
+            
+            button, #status {
+                min-width: 150px;
+                padding: 12px 20px;
+                font-size: 14px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <h1>🎤 语音助手</h1>
+        <p>连接到您的本地 Pipecat 语音助手，支持浏览器回声消除。</p>
+        <div id="status" class="status-disconnected">状态: 未连接</div>
+        <br/>
+        <button id="connectButton">连接并开始对话</button>
+        
+        <div id="conversation" class="conversation-hidden">
+            <h3>对话记录</h3>
+            <div id="messages"></div>
+        </div>
+    </div>
+
+    <script type="module">
+        class VoiceAssistant {
+            constructor() {
+                this.connectButton = document.getElementById('connectButton');
+                this.statusDiv = document.getElementById('status');
+                this.conversationDiv = document.getElementById('conversation');
+                this.messagesDiv = document.getElementById('messages');
+                this.peerConnection = null;
+                this.isConnected = false;
+                
+                this.init();
+            }
+
+            init() {
+                this.connectButton.onclick = () => this.toggleConnection();
+            }
+
+            setStatus(text, className) {
+                this.statusDiv.textContent = `状态: ${text}`;
+                this.statusDiv.className = `status-${className}`;
+            }
+
+            addMessage(content, type) {
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `message ${type}`;
+                
+                const timestamp = new Date().toLocaleTimeString('zh-CN', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit'
+                });
+                
+                messageDiv.innerHTML = `
+                    <div>${content}</div>
+                    <div class="timestamp">${timestamp}</div>
+                `;
+                
+                this.messagesDiv.appendChild(messageDiv);
+                this.messagesDiv.scrollTop = this.messagesDiv.scrollHeight;
+                
+                // 显示对话区域
+                if (this.conversationDiv.classList.contains('conversation-hidden')) {
+                    this.conversationDiv.classList.remove('conversation-hidden');
+                    this.conversationDiv.classList.add('conversation-visible');
+                }
+            }
+
+            async toggleConnection() {
+                if (this.isConnected) {
+                    this.disconnect();
+                } else {
+                    await this.connect();
+                }
+            }
+
+            async connect() {
+                this.connectButton.disabled = true;
+                this.setStatus('连接中...', 'connecting');
+
+                try {
+                    // 获取麦克风权限，启用回声消除
+                    const stream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true,
+                            sampleRate: 16000
+                        },
+                        video: false
+                    });
+
+                    // 创建 WebRTC 连接
+                    this.peerConnection = new RTCPeerConnection({
+                        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+                    });
+
+                    // 添加本地音频轨道
+                    stream.getTracks().forEach(track => {
+                        this.peerConnection.addTrack(track, stream);
+                    });
+
+                    // 处理远程音频
+                    const remoteAudio = new Audio();
+                    remoteAudio.autoplay = true;
+                    this.peerConnection.ontrack = (event) => {
+                        if (event.track.kind === 'audio') {
+                            remoteAudio.srcObject = event.streams[0];
+                            remoteAudio.play().catch(e => {
+                                console.error("远程音频播放失败:", e);
+                            });
+                        }
+                    };
+
+                    // 监听连接状态变化
+                    this.peerConnection.onconnectionstatechange = () => {
+                        const state = this.peerConnection.connectionState;
+                        console.log(`WebRTC 连接状态: ${state}`);
+                        
+                        if (state === 'connected') {
+                            this.isConnected = true;
+                            this.setStatus('已连接，请开始说话！', 'connected');
+                            this.connectButton.textContent = '断开连接';
+                            this.connectButton.disabled = false;
+                            this.addMessage('连接成功！您现在可以开始语音对话了。', 'assistant');
+                        } else if (state === 'failed' || state === 'disconnected' || state === 'closed') {
+                            this.disconnect();
+                        }
+                    };
+
+                    // 创建并发送 offer
+                    const offer = await this.peerConnection.createOffer();
+                    await this.peerConnection.setLocalDescription(offer);
+
+                    const response = await fetch('/api/offer', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            sdp: offer.sdp,
+                            type: offer.type,
+                            pc_id: Math.random().toString(36).substring(7)
+                        })
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`服务器响应错误: ${response.status}`);
+                    }
+
+                    const answer = await response.json();
+                    await this.peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+
+                } catch (err) {
+                    console.error("连接失败:", err);
+                    this.setStatus(`错误: ${err.message}`, 'error');
+                    this.connectButton.disabled = false;
+                    this.addMessage(`连接失败: ${err.message}`, 'assistant');
+                }
+            }
+
+            disconnect() {
+                if (this.peerConnection) {
+                    this.peerConnection.close();
+                    this.peerConnection = null;
+                }
+                
+                this.isConnected = false;
+                this.setStatus('未连接', 'disconnected');
+                this.connectButton.textContent = '连接并开始对话';
+                this.connectButton.disabled = false;
+                
+                if (this.isConnected) {
+                    this.addMessage('连接已断开。', 'assistant');
+                }
+            }
+        }
+
+        // 初始化语音助手
+        document.addEventListener('DOMContentLoaded', () => {
+            new VoiceAssistant();
+        });
+    </script>
+</body>
+</html> 
