@@ -22,7 +22,22 @@ cp .env.example .env
 # Edit .env with your API keys
 ```
 
-### Run
+### Run (Recommended: Hypercorn)
+
+For best reliability and clean shutdown (Ctrl+C), use [Hypercorn](https://pgjones.gitlab.io/hypercorn/):
+
+```bash
+pip install hypercorn
+hypercorn openai_fish_demo:app --bind localhost:7860
+```
+
+- This will serve your app on http://localhost:7860
+- Press Ctrl+C to stop the server cleanly
+
+### Run (Legacy: Python Script)
+
+You can also run directly (not recommended for production):
+
 ```bash
 python openai_fish_demo.py
 ```
@@ -45,8 +60,19 @@ Browser Mic → OpenAI Whisper → GPT-4o → Fish TTS → Browser Speaker
 
 Built with [Pipecat](https://github.com/pipecat-ai/pipecat) framework.
 
+## ASGI Server Note
+
+For Hypercorn, Uvicorn, or Gunicorn, your `openai_fish_demo.py` must expose a top-level `app` variable:
+
+```python
+app = create_webrtc_server()
+```
+
+This allows ASGI servers to find and run your FastAPI app.
+
 ## Troubleshooting
 
 - **No audio**: Check browser microphone/speaker permissions
 - **API errors**: Verify keys in `.env` file
 - **Connection issues**: Try incognito mode or different browser
+- **Server won't stop with Ctrl+C**: Use Hypercorn as shown above for best results

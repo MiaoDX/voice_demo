@@ -20,16 +20,20 @@ Fixed Issues:
 - Audio output issues (proper sample rates and volume)
 - StartFrame initialization problems
 - WebRTC browser integration
+- Signal handling for proper Ctrl+C shutdown
 """
 
 import asyncio
 import os
 import logging
-from typing import Dict
+import signal
+import sys
+from typing import Dict, List
+import unicodedata
 
 from dotenv import load_dotenv
 import uvicorn
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -50,6 +54,9 @@ from pipecat.transports.network.webrtc_connection import SmallWebRTCConnection, 
 
 # Load environment variables
 load_dotenv()
+
+# Global list to track running pipeline tasks
+PIPELINE_TASKS: List[asyncio.Task] = []
 
 # Configure logging
 logging.basicConfig(
@@ -99,88 +106,93 @@ def validate_environment() -> bool:
 
 async def run_voice_assistant(transport: SmallWebRTCTransport, args=None, started=False):
     """Voice assistant pipeline that runs with the given transport"""
-    
     logger.info("🎤 Starting Voice Assistant with WebRTC transport")
-    
+
     try:
-        # Create OpenAI STT service
-        logger.info("Initializing OpenAI STT...")
+        # Initialize services
         openai_stt = OpenAISTTService(
             api_key=os.getenv("OPENAI_API_KEY"),
-            base_url=os.getenv("OPENAI_API_BASE"),  # Optional
+            base_url=os.getenv("OPENAI_API_BASE"),
             model="whisper-1"
         )
-        
-        # Create OpenAI LLM service (traditional v1)
-        logger.info("Initializing OpenAI LLM...")
         openai_llm = OpenAILLMService(
             api_key=os.getenv("OPENAI_API_KEY"),
-            base_url=os.getenv("OPENAI_API_BASE"),  # Optional
+            base_url=os.getenv("OPENAI_API_BASE"),
             model="gpt-4o"
         )
-        
-        # Create Fish TTS service with proper settings
-        fish_model_id = os.getenv("FISH_MODEL_ID")
-        logger.info(f"Initializing Fish TTS with model: {fish_model_id}")
-        
         fish_tts = FishAudioTTSService(
             api_key=os.getenv("FISH_API_KEY"),
-            model=fish_model_id,
+            model=os.getenv("FISH_MODEL_ID"),
             output_format="pcm",
             params=FishAudioTTSService.InputParams(language=Language.ZH_CN),
         )
-        
-        # Create conversation context
         context = OpenAILLMContext(
-            messages=[
-                {
-                    "role": "system", 
-                    "content": "你是一个有帮助的中文助理，请始终用简体中文与用户对话，回答要简洁自然。"
-                }
-            ]
+            messages=[{
+                "role": "system",
+                "content": (
+                    "你是一个有帮助的中文语音助理。请始终用简体中文与用户对话，"
+                    "每次回答必须控制在40个汉字以内（或20秒语音），只回答用户最新的问题，"
+                    "如果用户一次问多个问题，只回答最后一个。如果答案太长，"
+                    "请简要总结或礼貌拒绝。不要重复未回答的问题。"
+                    "所有回复都要简洁自然，适合语音播放。"
+                )
+            }]
         )
-        
-        # Create context aggregators using modern API
         context_aggregator = openai_llm.create_context_aggregator(context)
-        
-        # Build the traditional processing pipeline:
-        # Audio Input → STT → User Context → LLM → Assistant Context → TTS → Audio Output
-        logger.info("Building traditional pipeline...")
+
+        # 自定义文本截断处理器，防止 TTS 超长
+        class TruncateTextProcessor(FrameProcessor):
+            def __init__(self, max_chars=100):
+                super().__init__()
+                self.max_chars = max_chars
+                self.trunc_hint = "（已截断，问题请简短）"
+
+            async def process_frame(self, frame, direction):
+                # 只处理文本帧，其它帧直接透传
+                if isinstance(frame, TextFrame) and hasattr(frame, 'text') and isinstance(frame.text, str):
+                    text = frame.text.strip()
+                    if len(text) == 0:
+                        frame.text = "抱歉，我没有听清，请再说一遍。"
+                    elif len(text) > self.max_chars:
+                        frame.text = text[:self.max_chars] + self.trunc_hint
+                await self.push_frame(frame, direction)
+
         pipeline = Pipeline([
-            transport.input(),                   # WebRTC audio input with browser AEC
-            openai_stt,                         # Speech-to-text
-            context_aggregator.user(),           # User message aggregation
-            openai_llm,                         # LLM processing
-            fish_tts,                           # Fish TTS synthesis
-            transport.output(),                  # WebRTC audio output
+            transport.input(),
+            openai_stt,
+            context_aggregator.user(),
+            openai_llm,
+            # TruncateTextProcessor(max_chars=100),
+            fish_tts,
+            transport.output(),
+            context_aggregator.assistant(),
         ])
-        
-        # Create pipeline task with proper initialization
         task = PipelineTask(
             pipeline,
             params=PipelineParams(
-                allow_interruptions=False,
+                allow_interruptions=True,
                 enable_metrics=False,
                 enable_usage_metrics=False
             )
         )
-        
-        # Initialize context
-        await task.queue_frames([
-            LLMMessagesFrame(context.messages)
-        ])
-        
-        # Create and start runner
+        await task.queue_frames([LLMMessagesFrame(context.messages)])
+
         runner = PipelineRunner()
-        
         logger.info("🎙️ Voice assistant pipeline started, waiting for browser connection...")
-        
-        # Run the pipeline
+
         await runner.run(task)
-        
+
+    except asyncio.CancelledError:
+        logger.info("Voice assistant task was cancelled")
+        # No need to re-raise, expected on shutdown
     except Exception as e:
         logger.error(f"Voice assistant error: {e}", exc_info=True)
-        raise
+    finally:
+        try:
+            await runner.cleanup()
+        except Exception as e:
+            logger.warning(f"Error during runner cleanup: {e}")
+        logger.info("Pipeline task finished.")
 
 
 def create_webrtc_server():
@@ -228,7 +240,7 @@ def create_webrtc_server():
             return HTMLResponse(content=f"<html><body><h1>Error: {e}</h1></body></html>")
     
     @app.post("/api/offer")
-    async def offer(request: dict, background_tasks: BackgroundTasks):
+    async def offer(request: dict):
         """Handle WebRTC offer and create answer"""
         
         logger.info("Received WebRTC offer")
@@ -264,9 +276,11 @@ def create_webrtc_server():
                 )
                 transport = SmallWebRTCTransport(webrtc_connection=webrtc_connection, params=transport_params)
                 
-                # Start voice assistant in background
-                background_tasks.add_task(run_voice_assistant, transport)
-            
+                # Start voice assistant in background and track the task
+                task = asyncio.create_task(run_voice_assistant(transport))
+                PIPELINE_TASKS.append(task)
+                task.add_done_callback(PIPELINE_TASKS.remove)
+
             # Get answer and store connection
             answer = webrtc_connection.get_answer()
             connections_map[answer["pc_id"]] = webrtc_connection
@@ -278,41 +292,99 @@ def create_webrtc_server():
             logger.error(f"Error handling WebRTC offer: {e}", exc_info=True)
             raise
     
+    # Add shutdown endpoint for programmatic termination
+    @app.post("/shutdown")
+    async def shutdown():
+        """Programmatically shutdown the server"""
+        logger.info("Shutdown request received")
+        
+        # Cancel all pipeline tasks
+        for task in PIPELINE_TASKS[:]:
+            if not task.done():
+                task.cancel()
+        
+        # Wait for tasks to finish cancellation
+        if PIPELINE_TASKS:
+            await asyncio.gather(*PIPELINE_TASKS, return_exceptions=True)
+        
+        # Send SIGTERM to self to shutdown uvicorn
+        os.kill(os.getpid(), signal.SIGTERM)
+        
+        return {"message": "Shutting down..."}
+    
     return app
 
 
-def main():
-    """Main function to start the WebRTC server"""
+async def main():
+    """Main function to start the WebRTC server with proper signal handling."""
     
     print("\n" + "="*60)
     print("🎤 语音助手: WebRTC + Fish TTS")
     print("="*60)
     
-    # Validate environment
     if not validate_environment():
         return
+        
+    app = create_webrtc_server()
     
-    try:
-        # Create and start FastAPI server
-        app = create_webrtc_server()
-        
-        print("🌐 Starting WebRTC server...")
-        print("📱 Open your browser and visit: http://localhost:7860")
-        print("🎙️  Click '连接并开始对话' to start voice conversation")
-        print("🔊 Audio will be played through your browser with echo cancellation")
-        print("⏹️  Press Ctrl+C to stop")
-        print("="*60 + "\n")
-        
-        uvicorn.run(app, host="localhost", port=7860, log_level="info")
-        
-    except KeyboardInterrupt:
+    # Add shutdown event handler to FastAPI app
+    @app.on_event("shutdown")
+    async def shutdown_event():
         print("\n🛑 Shutting down gracefully...")
-    except Exception as e:
-        logger.error(f"Server error: {e}", exc_info=True)
-        raise
-    finally:
-        print("✅ Server ended. Goodbye!")
+        print("Canceling all running pipeline tasks...")
+        
+        # Cancel all pipeline tasks
+        for task in PIPELINE_TASKS[:]:  # Copy list to avoid modification during iteration
+            if not task.done():
+                task.cancel()
+        
+        # Wait for tasks to finish cancellation
+        if PIPELINE_TASKS:
+            await asyncio.gather(*PIPELINE_TASKS, return_exceptions=True)
+        
+        print("All pipeline tasks stopped.")
+    
+    print("🌐 Starting WebRTC server...")
+    print("📱 Open your browser and visit: http://localhost:7860")
+    print("🎙️  Click '连接并开始对话' to start voice conversation")
+    print("🔊 Audio will be played through your browser with echo cancellation")
+    print("⏹️  Press Ctrl+C to stop")
+    print("="*60 + "\n")
+    
+    # Use uvicorn.run with its built-in signal handling
+    config = uvicorn.Config(
+        app,
+        host="localhost",
+        port=7860,
+        log_level="info",
+        access_log=False,
+    )
+    server = uvicorn.Server(config)
+    
+    # Install custom signal handler for SIGINT
+    def signal_handler(signum, frame):
+        print(f"\n🛑 Signal {signum} received, initiating shutdown...")
+        # Send shutdown request to ourselves
+        try:
+            import requests
+            requests.post("http://localhost:7860/shutdown", timeout=1)
+        except:
+            # If the requests fails, force shutdown with SIGTERM
+            os.kill(os.getpid(), signal.SIGTERM)
+    
+    # Register the signal handler
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    await server.serve()
 
+
+# Make sure this is the last top-level statement before __main__
+app = create_webrtc_server()
 
 if __name__ == "__main__":
-    asyncio.run(main()) if hasattr(asyncio, 'run') else main() 
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n🛑 Shutting down gracefully...")
+    finally:
+        print("✅ Server ended. Goodbye!") 
