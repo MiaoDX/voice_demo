@@ -20,19 +20,16 @@ Fixed Issues:
 - Audio output issues (proper sample rates and volume)
 - StartFrame initialization problems
 - WebRTC browser integration
-- Signal handling for proper Ctrl+C shutdown
+- Uses Hypercorn for proper signal handling (no custom handlers needed)
 """
 
 import asyncio
 import os
 import logging
-import signal
-import sys
 from typing import Dict, List
 import unicodedata
 
 from dotenv import load_dotenv
-import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -200,6 +197,7 @@ async def run_voice_assistant(transport: SmallWebRTCTransport, args=None, starte
     except Exception as e:
         logger.error(f"Voice assistant error: {e}", exc_info=True)
     finally:
+        # Clean up
         try:
             await runner.cleanup()
         except Exception as e:
@@ -304,46 +302,11 @@ def create_webrtc_server():
             logger.error(f"Error handling WebRTC offer: {e}", exc_info=True)
             raise
     
-    # Add shutdown endpoint for programmatic termination
-    @app.post("/shutdown")
-    async def shutdown():
-        """Programmatically shutdown the server"""
-        logger.info("Shutdown request received")
-        
-        # Cancel all pipeline tasks
-        for task in PIPELINE_TASKS[:]:
-            if not task.done():
-                task.cancel()
-        
-        # Wait for tasks to finish cancellation
-        if PIPELINE_TASKS:
-            await asyncio.gather(*PIPELINE_TASKS, return_exceptions=True)
-        
-        # Send SIGTERM to self to shutdown uvicorn
-        os.kill(os.getpid(), signal.SIGTERM)
-        
-        return {"message": "Shutting down..."}
-    
-    return app
-
-
-async def main():
-    """Main function to start the WebRTC server with proper signal handling."""
-    
-    print("\n" + "="*60)
-    print("🎤 语音助手: WebRTC + Fish TTS")
-    print("="*60)
-    
-    if not validate_environment():
-        return
-        
-    app = create_webrtc_server()
-    
     # Add shutdown event handler to FastAPI app
     @app.on_event("shutdown")
     async def shutdown_event():
-        print("\n🛑 Shutting down gracefully...")
-        print("Canceling all running pipeline tasks...")
+        logger.info("🛑 Shutting down gracefully...")
+        logger.info("Canceling all running pipeline tasks...")
         
         # Cancel all pipeline tasks
         for task in PIPELINE_TASKS[:]:  # Copy list to avoid modification during iteration
@@ -354,48 +317,37 @@ async def main():
         if PIPELINE_TASKS:
             await asyncio.gather(*PIPELINE_TASKS, return_exceptions=True)
         
-        print("All pipeline tasks stopped.")
+        logger.info("All pipeline tasks stopped.")
     
-    print("🌐 Starting WebRTC server...")
+    return app
+
+
+# Create the FastAPI app for ASGI servers (Hypercorn, Uvicorn, Gunicorn)
+app = create_webrtc_server()
+
+
+# Legacy direct execution support (when run with `python openai_fish_demo.py`)
+if __name__ == "__main__":
+    print("\n" + "="*60)
+    print("🎤 语音助手: WebRTC + Fish TTS")
+    print("="*60)
+    print("⚠️  Running directly with Python")
+    print("💡 For production, use: hypercorn openai_fish_demo:app --bind localhost:7860")
+    print("="*60 + "\n")
+    
+    if not validate_environment():
+        exit(1)
+    
+    print("🌐 Starting server...")
     print("📱 Open your browser and visit: http://localhost:7860")
     print("🎙️  Click '连接并开始对话' to start voice conversation")
     print("🔊 Audio will be played through your browser with echo cancellation")
     print("⏹️  Press Ctrl+C to stop")
     print("="*60 + "\n")
     
-    # Use uvicorn.run with its built-in signal handling
-    config = uvicorn.Config(
-        app,
-        host="localhost",
-        port=7860,
-        log_level="info",
-        access_log=False,
-    )
-    server = uvicorn.Server(config)
-    
-    # Install custom signal handler for SIGINT
-    def signal_handler(signum, frame):
-        print(f"\n🛑 Signal {signum} received, initiating shutdown...")
-        # Send shutdown request to ourselves
-        try:
-            import requests
-            requests.post("http://localhost:7860/shutdown", timeout=1)
-        except:
-            # If the requests fails, force shutdown with SIGTERM
-            os.kill(os.getpid(), signal.SIGTERM)
-    
-    # Register the signal handler
-    signal.signal(signal.SIGINT, signal_handler)
-    
-    await server.serve()
-
-
-# Make sure this is the last top-level statement before __main__
-app = create_webrtc_server()
-
-if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        import uvicorn
+        uvicorn.run(app, host="localhost", port=7860, log_level="info")
     except KeyboardInterrupt:
         print("\n🛑 Shutting down gracefully...")
     finally:
