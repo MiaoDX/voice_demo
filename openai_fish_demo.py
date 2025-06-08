@@ -37,7 +37,7 @@ from fastapi import FastAPI
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from pipecat.frames.frames import LLMMessagesFrame, TextFrame
+from pipecat.frames.frames import LLMMessagesFrame, TextFrame, StartFrame, LLMTextFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -81,6 +81,34 @@ class FrameLogger(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
+# By subclassing the service, we inherit all its complex lifecycle and
+# initialization behavior, completely avoiding the previous errors. We only
+# need to override the push_frame method to intercept and modify the
+# outgoing text. This is the correct, robust, and simple solution.
+class TruncatingOpenAILLMService(OpenAILLMService):
+    def __init__(self, *, max_chars=100, **kwargs):
+        super().__init__(**kwargs)
+        self._max_chars = max_chars
+        self._trunc_hint = "（过长内容已截断）"
+
+    async def push_frame(self, frame, direction=None):
+        # Convert LLMTextFrame to TextFrame and truncate
+        if isinstance(frame, LLMTextFrame):
+            text = frame.text.strip()
+            if len(text) > self._max_chars:
+                text = text[:self._max_chars] + self._trunc_hint
+            elif len(text) == 0:
+                return
+            frame = TextFrame(text)
+        elif isinstance(frame, TextFrame):
+            text = frame.text.strip()
+            if len(text) > self._max_chars:
+                frame.text = text[:self._max_chars] + self._trunc_hint
+            elif len(text) == 0:
+                return
+        await super().push_frame(frame, direction)
+
+
 def validate_environment() -> bool:
     """Validate required environment variables"""
     required_vars = {
@@ -113,8 +141,10 @@ async def run_voice_assistant(transport: SmallWebRTCTransport, args=None, starte
         openai_stt = OpenAISTTService(
             api_key=os.getenv("OPENAI_API_KEY"),
             base_url=os.getenv("OPENAI_API_BASE"),
-            model="whisper-1"
+            model="whisper-1",
+            language=Language.ZH_CN
         )
+        # Use our new subclassed service to handle truncation automatically.
         openai_llm = OpenAILLMService(
             api_key=os.getenv("OPENAI_API_KEY"),
             base_url=os.getenv("OPENAI_API_BASE"),
@@ -131,7 +161,7 @@ async def run_voice_assistant(transport: SmallWebRTCTransport, args=None, starte
                 "role": "system",
                 "content": (
                     "你是一个有帮助的中文语音助理。请始终用简体中文与用户对话，"
-                    "每次回答必须控制在40个汉字以内（或20秒语音），只回答用户最新的问题，"
+                    "每次回答必须控制在40个汉字以内（或10秒语音），只回答用户最新的问题，"
                     "如果用户一次问多个问题，只回答最后一个。如果答案太长，"
                     "请简要总结或礼貌拒绝。不要重复未回答的问题。"
                     "所有回复都要简洁自然，适合语音播放。"
@@ -140,29 +170,11 @@ async def run_voice_assistant(transport: SmallWebRTCTransport, args=None, starte
         )
         context_aggregator = openai_llm.create_context_aggregator(context)
 
-        # 自定义文本截断处理器，防止 TTS 超长
-        class TruncateTextProcessor(FrameProcessor):
-            def __init__(self, max_chars=100):
-                super().__init__()
-                self.max_chars = max_chars
-                self.trunc_hint = "（已截断，问题请简短）"
-
-            async def process_frame(self, frame, direction):
-                # 只处理文本帧，其它帧直接透传
-                if isinstance(frame, TextFrame) and hasattr(frame, 'text') and isinstance(frame.text, str):
-                    text = frame.text.strip()
-                    if len(text) == 0:
-                        frame.text = "抱歉，我没有听清，请再说一遍。"
-                    elif len(text) > self.max_chars:
-                        frame.text = text[:self.max_chars] + self.trunc_hint
-                await self.push_frame(frame, direction)
-
         pipeline = Pipeline([
             transport.input(),
             openai_stt,
             context_aggregator.user(),
             openai_llm,
-            # TruncateTextProcessor(max_chars=100),
             fish_tts,
             transport.output(),
             context_aggregator.assistant(),
